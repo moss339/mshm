@@ -1,0 +1,13 @@
+name: mshm
+description: TODO
+
+source:
+  root: .
+
+dependencies:
+  local: []
+
+build:
+  type: library
+  cmake_options:
+    CMAKE_BUILD_TYPE: Release

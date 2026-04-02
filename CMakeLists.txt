@@ -1,16 +1,12 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.14)
+
+option(BUILD_SHARED_LIBS "Build shared libraries" ON)
+
 project(mshm C)
 
-option(SHM_BUILD_TESTS "Build test programs" ON)
-
-add_compile_definitions(SHM_PLATFORM_LINUX=1)
-add_compile_options(-Wall -Wextra -pedantic)
-
-include_directories(${CMAKE_SOURCE_DIR}/include)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
 add_subdirectory(src)
 
-if(SHM_BUILD_TESTS)
-    enable_testing()
-    add_subdirectory(test)
-endif()
+install(DIRECTORY include/ DESTINATION include)
