@@ -38,9 +38,13 @@ shm_error_t shm_create(const char* name, size_t data_size,
 
     shm_header_t* header = (shm_header_t*)addr;
     header->magic = SHM_MAGIC; header->version = SHM_VERSION;
-    header->data_size = data_size; header->ref_count = 1;
-    header->connected_count = 1; header->interest_mask = 0xFFFFFFFF;
+    header->data_size = data_size;
+    // 使用原子操作初始化计数器
+    __atomic_store_n(&header->ref_count, 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&header->connected_count, 1, __ATOMIC_SEQ_CST);
+    header->interest_mask = 0xFFFFFFFF;
     header->pending_notify = 0;
+    __atomic_store_n(&header->notify_counter, 0, __ATOMIC_SEQ_CST);
 
     int notify_fd = eventfd(0, EFD_NONBLOCK);
     if (notify_fd < 0) { munmap(addr, total_size); close(fd); shm_unlink(name); return SHM_ERR_SYSTEM; }
@@ -59,7 +63,9 @@ shm_error_t shm_create(const char* name, size_t data_size,
 
     strncpy(handle->name, name, SHM_NAME_MAX - 1); handle->name[SHM_NAME_MAX - 1] = '\0';
     handle->fd = fd; handle->addr = addr; handle->mapped_size = total_size;
-    handle->is_server = 1; handle->local_notify_fd = notify_fd; handle->owner_thread = pthread_self();
+    handle->is_server = 1; handle->local_notify_fd = notify_fd;
+    handle->last_seen_counter = 0;  // Server 初始计数
+    handle->owner_thread = pthread_self();
     *out_handle = handle;
     return SHM_OK;
 }
@@ -88,7 +94,9 @@ shm_error_t shm_join(const char* name, shm_permission_t perm, shm_handle_t* out_
 
     strncpy(handle->name, name, SHM_NAME_MAX - 1); handle->name[SHM_NAME_MAX - 1] = '\0';
     handle->fd = fd; handle->addr = addr; handle->mapped_size = st.st_size;
-    handle->is_server = 0; handle->local_notify_fd = dup(header->notify_fd); handle->owner_thread = pthread_self();
+    handle->is_server = 0; handle->local_notify_fd = dup(header->notify_fd);
+    handle->last_seen_counter = __atomic_load_n(&header->notify_counter, __ATOMIC_SEQ_CST);
+    handle->owner_thread = pthread_self();
     *out_handle = handle;
     return SHM_OK;
 }
@@ -140,12 +148,25 @@ size_t shm_get_data_size(shm_handle_t handle) {
 
 shm_error_t shm_notify(shm_handle_t handle) {
     if (!handle) return SHM_ERR_INVALID_PARAM;
-    eventfd_write(((shm_header_t*)handle->addr)->notify_fd, 1);
+    shm_header_t* header = (shm_header_t*)handle->addr;
+    // 原子递增通知计数器
+    __sync_add_and_fetch(&header->notify_counter, 1);
+    // 写入 eventfd 唤醒等待者
+    eventfd_write(header->notify_fd, 1);
     return SHM_OK;
 }
 
 shm_error_t shm_wait(shm_handle_t handle, int timeout_ms) {
     if (!handle) return SHM_ERR_INVALID_PARAM;
+    shm_header_t* header = (shm_header_t*)handle->addr;
+
+    // 首先检查是否有待处理的通知（通过计数器比较）
+    uint64_t current_counter = __atomic_load_n(&header->notify_counter, __ATOMIC_SEQ_CST);
+    if (current_counter > handle->last_seen_counter) {
+        return SHM_OK;  // 有新通知
+    }
+
+    // 没有待处理通知，等待 eventfd
     struct pollfd pfd = { .fd = handle->local_notify_fd, .events = POLLIN };
     int ret = poll(&pfd, 1, timeout_ms);
     if (ret < 0) return SHM_ERR_SYSTEM;
@@ -158,8 +179,19 @@ int shm_get_notify_fd(shm_handle_t handle) {
 
 shm_error_t shm_consume_notify(shm_handle_t handle) {
     if (!handle) return SHM_ERR_INVALID_PARAM;
+    shm_header_t* header = (shm_header_t*)handle->addr;
+
+    // 更新本地看到的通知计数器（不消费 eventfd）
+    uint64_t current_counter = __atomic_load_n(&header->notify_counter, __ATOMIC_SEQ_CST);
+    handle->last_seen_counter = current_counter;
+
+    // 尝试消费 eventfd 以防止计数器无限增长
+    // 使用非阻塞读取，如果失败（EAGAIN）说明计数器已经是 0，可以忽略
     eventfd_t val;
-    return (eventfd_read(handle->local_notify_fd, &val) < 0) ? SHM_ERR_SYSTEM : SHM_OK;
+    eventfd_read(handle->local_notify_fd, &val);
+    // 忽略读取结果，因为我们使用 notify_counter 作为真实的通知判断依据
+
+    return SHM_OK;
 }
 
 shm_error_t shm_get_connection_count(shm_handle_t handle, uint32_t* count) {

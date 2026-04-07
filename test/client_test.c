@@ -9,7 +9,7 @@ typedef struct {
 } SensorData;
 
 int main(void) {
-    shm_handle_t* handle = NULL;
+    shm_handle_t handle = NULL;
     shm_error_t err;
 
     printf("[Client] Starting...\n");

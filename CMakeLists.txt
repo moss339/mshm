@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
+option(MSHM_BUILD_TESTS "Build tests" ON)
 
 project(mshm VERSION 1.0.0 LANGUAGES C)
 
@@ -10,7 +11,13 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
 
+enable_testing()
+
 add_subdirectory(src)
+
+if(MSHM_BUILD_TESTS)
+    add_subdirectory(test)
+endif()
 
 # Export mshm target
 export(TARGETS mshm NAMESPACE mshm:: FILE mshmTargets.cmake)

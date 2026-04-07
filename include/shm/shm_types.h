@@ -58,9 +58,10 @@ typedef struct shm_header {
     volatile uint32_t connected_count;
     int               notify_fd;
     volatile uint32_t interest_mask;
+    volatile uint64_t notify_counter;    // 通知计数器，用于广播语义
     volatile uint32_t pending_notify;
     shm_lock_t        lock;
-    uint8_t           reserved[SHM_HEADER_SIZE - sizeof(uint32_t) * 7 - sizeof(int) - sizeof(shm_lock_t)];
+    uint8_t           reserved[SHM_HEADER_SIZE - sizeof(uint32_t) * 7 - sizeof(uint64_t) - sizeof(int) - sizeof(shm_lock_t)];
 } shm_header_t;
 
 // ========== 句柄类型 (不透明指针) ==========
@@ -71,6 +72,7 @@ struct shm_handle_impl {
     size_t        mapped_size;
     int           is_server;       // true: created the shm (server), false: joined as client
     int           local_notify_fd;
+    uint64_t      last_seen_counter;  // 上次处理的通知计数器值
     pthread_t     owner_thread;
 };
 typedef struct shm_handle_impl* shm_handle_t;
