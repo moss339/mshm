@@ -49,6 +49,15 @@ typedef struct shm_lock {
     volatile int32_t state;
 } shm_lock_t;
 
+// ========== 客户端通知管理 ==========
+#define SHM_MAX_CLIENTS 8
+
+typedef struct shm_client_entry {
+    volatile int32_t  notify_fd;      // 客户端专用 eventfd，-1 表示空槽
+    volatile uint32_t client_id;      // 客户端标识
+    volatile uint32_t last_seen_seq;   // 上次确认序列号
+} shm_client_entry_t;
+
 // ========== 控制头 ==========
 typedef struct shm_header {
     uint32_t          magic;
@@ -56,12 +65,15 @@ typedef struct shm_header {
     uint32_t          data_size;
     volatile uint32_t ref_count;
     volatile uint32_t connected_count;
-    int               notify_fd;
+    int               notify_fd;          // 保留兼容，服务端主 eventfd
     volatile uint32_t interest_mask;
     volatile uint64_t notify_counter;    // 通知计数器，用于广播语义
     volatile uint32_t pending_notify;
+    volatile uint32_t client_count;      // 已注册客户端数
+    volatile uint32_t next_client_id;    // 下一个客户端 ID
+    shm_client_entry_t clients[SHM_MAX_CLIENTS];
     shm_lock_t        lock;
-    uint8_t           reserved[SHM_HEADER_SIZE - sizeof(uint32_t) * 7 - sizeof(uint64_t) - sizeof(int) - sizeof(shm_lock_t)];
+    uint8_t           reserved[SHM_HEADER_SIZE - sizeof(uint32_t) * 9 - sizeof(uint64_t) - sizeof(int) - sizeof(shm_lock_t) - sizeof(shm_client_entry_t) * SHM_MAX_CLIENTS];
 } shm_header_t;
 
 // ========== 句柄类型 (不透明指针) ==========
@@ -72,6 +84,8 @@ struct shm_handle_impl {
     size_t        mapped_size;
     int           is_server;       // true: created the shm (server), false: joined as client
     int           local_notify_fd;
+    int           client_slot;     // 客户端槽位索引（-1 表示服务端）
+    uint32_t      client_id;       // 客户端唯一 ID
     uint64_t      last_seen_counter;  // 上次处理的通知计数器值
     pthread_t     owner_thread;
 };
