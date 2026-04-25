@@ -53,9 +53,8 @@ typedef struct shm_lock {
 #define SHM_MAX_CLIENTS 8
 
 typedef struct shm_client_entry {
-    volatile int32_t  notify_fd;      // 客户端专用 eventfd，-1 表示空槽
     volatile uint32_t client_id;      // 客户端标识
-    volatile uint32_t last_seen_seq;   // 上次确认序列号
+    volatile uint32_t last_seen_seq;  // 上次确认序列号
 } shm_client_entry_t;
 
 // ========== 控制头 ==========
@@ -65,7 +64,7 @@ typedef struct shm_header {
     uint32_t          data_size;
     volatile uint32_t ref_count;
     volatile uint32_t connected_count;
-    int               notify_fd;          // 保留兼容，服务端主 eventfd
+    int               notify_fd;          // 服务端主 eventfd，用于广播通知
     volatile uint32_t interest_mask;
     volatile uint64_t notify_counter;    // 通知计数器，用于广播语义
     volatile uint32_t pending_notify;
@@ -83,7 +82,7 @@ struct shm_handle_impl {
     void*         addr;
     size_t        mapped_size;
     int           is_server;       // true: created the shm (server), false: joined as client
-    int           local_notify_fd;
+    int           local_notify_fd; // 本地 eventfd 副本（客户端 poll 用）
     int           client_slot;     // 客户端槽位索引（-1 表示服务端）
     uint32_t      client_id;       // 客户端唯一 ID
     uint64_t      last_seen_counter;  // 上次处理的通知计数器值

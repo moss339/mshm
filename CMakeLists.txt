@@ -30,6 +30,7 @@ install(TARGETS mshm
 )
 
 install(EXPORT mshmTargets
+    NAMESPACE mshm::
     FILE mshmTargets.cmake
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mshm
 )

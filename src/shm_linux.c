@@ -50,7 +50,6 @@ shm_error_t shm_create(const char* name, size_t data_size,
 
     // 初始化客户端槽位
     for (int i = 0; i < SHM_MAX_CLIENTS; i++) {
-        header->clients[i].notify_fd = -1;
         header->clients[i].client_id = 0;
         header->clients[i].last_seen_seq = 0;
     }
@@ -98,22 +97,14 @@ shm_error_t shm_join(const char* name, shm_permission_t perm, shm_handle_t* out_
     shm_header_t* header = (shm_header_t*)addr;
     if (header->magic != SHM_MAGIC) { munmap(addr, st.st_size); close(fd); return SHM_ERR_NOT_FOUND; }
 
-    // 创建客户端专用 eventfd
-    int client_notify_fd = eventfd(0, EFD_NONBLOCK);
-    if (client_notify_fd < 0) {
-        munmap(addr, st.st_size);
-        close(fd);
-        return SHM_ERR_SYSTEM;
-    }
-
     // 注册客户端到服务端
     uint32_t client_id = __atomic_fetch_add(&header->next_client_id, 1, __ATOMIC_SEQ_CST);
     int slot_found = -1;
 
-    // 寻找空槽位（简单遍历，可优化为原子操作）
+    // 寻找空槽位（client_id 为 0 表示空槽）
     for (int i = 0; i < SHM_MAX_CLIENTS; i++) {
-        int32_t expected = -1;
-        if (__atomic_compare_exchange_n(&header->clients[i].notify_fd, &expected, client_notify_fd,
+        uint32_t expected = 0;
+        if (__atomic_compare_exchange_n(&header->clients[i].client_id, &expected, client_id,
                                          0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
             slot_found = i;
             break;
@@ -122,13 +113,11 @@ shm_error_t shm_join(const char* name, shm_permission_t perm, shm_handle_t* out_
 
     if (slot_found < 0) {
         // 没有空槽位
-        close(client_notify_fd);
         munmap(addr, st.st_size);
         close(fd);
         return SHM_ERR_NO_MEMORY;
     }
 
-    __atomic_store_n(&header->clients[slot_found].client_id, client_id, __ATOMIC_SEQ_CST);
     __atomic_store_n(&header->clients[slot_found].last_seen_seq, 0, __ATOMIC_SEQ_CST);
     __atomic_add_fetch(&header->client_count, 1, __ATOMIC_SEQ_CST);
 
@@ -137,11 +126,10 @@ shm_error_t shm_join(const char* name, shm_permission_t perm, shm_handle_t* out_
 
     shm_handle_t handle = malloc(sizeof(struct shm_handle_impl));
     if (!handle) {
-        __atomic_store_n(&header->clients[slot_found].notify_fd, -1, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&header->clients[slot_found].client_id, 0, __ATOMIC_SEQ_CST);
         __atomic_sub_fetch(&header->client_count, 1, __ATOMIC_SEQ_CST);
         __sync_sub_and_fetch(&header->ref_count, 1);
         __sync_sub_and_fetch(&header->connected_count, 1);
-        close(client_notify_fd);
         munmap(addr, st.st_size);
         close(fd);
         return SHM_ERR_NO_MEMORY;
@@ -153,7 +141,8 @@ shm_error_t shm_join(const char* name, shm_permission_t perm, shm_handle_t* out_
     handle->addr = addr;
     handle->mapped_size = st.st_size;
     handle->is_server = 0;
-    handle->local_notify_fd = client_notify_fd;
+    // 客户端使用服务端的主 eventfd 进行 poll
+    handle->local_notify_fd = header->notify_fd;
     handle->client_slot = slot_found;
     handle->client_id = client_id;
     handle->last_seen_counter = __atomic_load_n(&header->notify_counter, __ATOMIC_SEQ_CST);
@@ -180,14 +169,15 @@ shm_error_t shm_close(shm_handle_t* handle) {
 
         // 客户端注销：释放槽位
         if (!impl->is_server && impl->client_slot >= 0 && impl->client_slot < SHM_MAX_CLIENTS) {
-            int32_t old_fd = __atomic_exchange_n(&header->clients[impl->client_slot].notify_fd, -1, __ATOMIC_SEQ_CST);
-            if (old_fd >= 0) {
-                close(old_fd);
-            }
+            __atomic_store_n(&header->clients[impl->client_slot].client_id, 0, __ATOMIC_SEQ_CST);
             __atomic_sub_fetch(&header->client_count, 1, __ATOMIC_SEQ_CST);
         }
     }
-    if (impl->local_notify_fd >= 0) close(impl->local_notify_fd);
+    // 注意：客户端不再关闭 local_notify_fd，因为它指向服务端的 eventfd
+    // 只有服务端才关闭主 eventfd
+    if (impl->is_server && impl->local_notify_fd >= 0) {
+        close(impl->local_notify_fd);
+    }
     close(impl->fd);
     if (impl->addr) munmap(impl->addr, impl->mapped_size);
     free(impl);
@@ -223,18 +213,8 @@ shm_error_t shm_notify(shm_handle_t handle) {
     // 原子递增通知计数器
     __sync_add_and_fetch(&header->notify_counter, 1);
 
-    // 广播到所有已注册客户端
-    for (int i = 0; i < SHM_MAX_CLIENTS; i++) {
-        int32_t client_fd = __atomic_load_n(&header->clients[i].notify_fd, __ATOMIC_SEQ_CST);
-        if (client_fd >= 0) {
-            // 非阻塞写入，忽略 EAGAIN（客户端还没消费）
-            uint64_t val = 1;
-            ssize_t ret = write(client_fd, &val, sizeof(val));
-            (void)ret;  // 忽略写入错误（客户端可能已断开）
-        }
-    }
-
-    // 同时写入主 eventfd（兼容旧逻辑）
+    // 写入主 eventfd，广播通知所有客户端
+    // 客户端通过 poll 主 eventfd 并检查 notify_counter 来接收通知
     eventfd_write(header->notify_fd, 1);
     return SHM_OK;
 }
